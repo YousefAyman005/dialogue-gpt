@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import sentencepiece as spm
+import tiktoken
 
 # hyperparameters
 batch_size = 32 # how many independent sequences will we process in parallel?
@@ -16,7 +16,6 @@ n_embd = 384  # can increase back with smaller vocab
 n_head = 6
 n_layers = 6
 dropout = 0.2
-VOCAB_SIZE = 8000  # Custom vocab size for BPE
 # ------------
 
 print(f"Using device: {device}")
@@ -29,32 +28,12 @@ torch.manual_seed(1337)
 with open('data/movies/input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
-# Train custom BPE tokenizer if it doesn't exist
-tokenizer_prefix = 'movie_tokenizer'
-if not os.path.exists(f'{tokenizer_prefix}.model'):
-    print(f"Training BPE tokenizer with vocab_size={VOCAB_SIZE}...")
-    spm.SentencePieceTrainer.train(
-        input='data/movies/input.txt',
-        model_prefix=tokenizer_prefix,
-        vocab_size=VOCAB_SIZE,
-        model_type='bpe',
-        character_coverage=1.0,
-        pad_id=0,
-        unk_id=1,
-        bos_id=2,
-        eos_id=3,
-    )
-    print("Tokenizer trained and saved!")
-else:
-    print(f"Loading existing tokenizer from {tokenizer_prefix}.model")
+# Initialize tiktoken encoder (using GPT-2 encoding)
+enc = tiktoken.get_encoding("gpt2")
 
-# Load tokenizer
-sp = spm.SentencePieceProcessor()
-sp.load(f'{tokenizer_prefix}.model')
-
-encode = lambda s: sp.encode(s)
-decode = lambda l: sp.decode(l)
-vocab_size = sp.get_piece_size()
+encode = lambda s: enc.encode(s, allowed_special={'<|endoftext|>'})
+decode = lambda l: enc.decode(l)
+vocab_size = enc.n_vocab
 print(f"Vocab size: {vocab_size}")
 
 # Train and test splits
