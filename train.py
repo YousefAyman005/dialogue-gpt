@@ -190,49 +190,53 @@ class BigramLanguageModel(nn.Module):
 model = BigramLanguageModel()
 m = model.to(device)
 
-# create a PyTorch optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+if __name__ == "__main__":
+    # create a PyTorch optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-# Load checkpoint if exists
-checkpoint_path = 'checkpoint.pt'
-start_iter = 0
-if os.path.exists(checkpoint_path):
-    print(f"Loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
-    model.load_state_dict(checkpoint['model'])
-    optimizer.load_state_dict(checkpoint['optimizer'])
-    start_iter = checkpoint['iter'] + 1
-    print(f"Resumed from iteration {checkpoint['iter']} (train_loss: {checkpoint['train_loss']:.4f}, val_loss: {checkpoint['val_loss']:.4f})")
-else:
-    print("Starting fresh training...")
+    # Load checkpoint if exists
+    checkpoint_path = 'checkpoint.pt'
+    start_iter = 0
+    if os.path.exists(checkpoint_path):
+        print(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_iter = checkpoint['iter'] + 1
+        print(f"Resumed from iteration {checkpoint['iter']} (train_loss: {checkpoint['train_loss']:.4f}, val_loss: {checkpoint['val_loss']:.4f})")
+    else:
+        print("Starting fresh training...")
 
-for iter in range(start_iter, max_iters):
+    for iter in range(start_iter, max_iters):
 
-    # every once in a while evaluate the loss on train and val sets
-    if iter % eval_interval == 0 or iter == max_iters - 1:
-        losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        
-        # Save checkpoint
-        checkpoint = {
-            'model': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'iter': iter,
-            'train_loss': losses['train'].item(),
-            'val_loss': losses['val'].item(),
-        }
-        torch.save(checkpoint, checkpoint_path)
-        print(f"Saved checkpoint at step {iter}")
+        # every once in a while evaluate the loss on train and val sets
+        if iter % eval_interval == 0 or iter == max_iters - 1:
+            losses = estimate_loss()
+            print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            
+            # Save checkpoint
+            checkpoint = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'iter': iter,
+                'train_loss': losses['train'].item(),
+                'val_loss': losses['val'].item(),
+            }
+            torch.save(checkpoint, checkpoint_path)
+            print(f"Saved checkpoint at step {iter}")
 
-    # sample a batch of data
-    xb, yb = get_batch('train')
+        # sample a batch of data
+        xb, yb = get_batch('train')
 
-    # evaluate the loss
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+        # evaluate the loss
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
 
-# generate from the model
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(context, max_new_tokens=2000)[0].tolist()))
+    print("\n" + "="*80)
+    print("Training complete!")
+    print(f"Final checkpoint saved to: {checkpoint_path}")
+    print("="*80)
+    print("\nTo generate text, run: python generate.py")
+    print("For more options: python generate.py --help")
