@@ -1,11 +1,13 @@
 import torch
 from train import model, decode, encode, device
 
-# Load checkpoint
-checkpoint = torch.load('checkpoint.pt', map_location=device, weights_only=False)
+# Load checkpoint from Google Drive
+checkpoint_path = '/content/drive/MyDrive/trainedModels/checkpoint.pt'
+checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 model.load_state_dict(checkpoint['model'])
 model.eval()
 print(f"Loaded model from iteration {checkpoint['iter']}")
+print(f"Train loss: {checkpoint['train_loss']:.4f}, Val loss: {checkpoint['val_loss']:.4f}")
 
 # Generate text
 prompt = ""  # Add your prompt here, e.g., "JOHN: Hello!"
