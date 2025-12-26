@@ -1,0 +1,139 @@
+(.venv) PS C:\Users\yousef\workspace\dialogue-gpt> Remove-Item checkpoint.pt -ErrorAction SilentlyContinue; C:/Users/yousef/workspace/dialogue-gpt/.venv/Scripts/python.exe .\train.py
+Using device: cuda
+GPU: NVIDIA GeForce RTX 3050 Ti Laptop GPU
+VRAM: 4.00GB total
+Starting fresh training...
+step 0: train loss 11.1869, val loss 11.1847
+Saved checkpoint at step 0
+step 500: train loss 4.7372, val loss 4.9740
+Saved checkpoint at step 500
+step 1000: train loss 4.3892, val loss 4.7229
+Saved checkpoint at step 1000
+step 1500: train loss 4.1679, val loss 4.5923
+Saved checkpoint at step 1500
+step 2000: train loss 3.9898, val loss 4.4216
+Saved checkpoint at step 2000
+step 2500: train loss 3.8741, val loss 4.3299
+Saved checkpoint at step 2500
+step 3000: train loss 3.7698, val loss 4.2274
+Saved checkpoint at step 3000
+step 3500: train loss 3.6729, val loss 4.1733
+Saved checkpoint at step 3500
+step 4000: train loss 3.6031, val loss 4.1757
+Saved checkpoint at step 4000
+step 4500: train loss 3.5817, val loss 4.1285
+Saved checkpoint at step 4500
+step 4999: train loss 3.5641, val loss 4.0689
+Saved checkpoint at step 4999
+! Why, domest wash me, we wouldn't want the same stuff in Rev!
+ETHAN: Well, what they are you tired of you?
+MCCALL: Betty are dead! this Ivory is a bus experiment on, died.
+NORTHER: Thanks.  See?
+J you no advice to yourself.
+MCCALL: Or don't believe me.
+SETH: You think you could play, 'a man.
+JUNNY: If you knew just, I don't remember the entrance I gave to go.
+JUNWIN: I want to talk.
+MCCALL: No! We're having a nice ending.  We're going on the front door down below for a little action running shape.
+MCCALL: In reliable.  Even we go in early, what's wrong?
+JUNNY: All right.  Break your proposal in everything, but you don't look too fast for sure he was groundedress----- his flame.  I have died you.  It has sat, by modernary Press two fucking over colonial ...
+NUNDERS: No, then turns?  I don't know!  More another choice I fought to tell you whotons Ive man in hell with Devel?  To score.  How was he from glass?  He ran in relation42.
+JUNDERS: That's a big film.
+NUNDY: I'm serious.
+NUNDERSET: You know, mainch debut? Until are greater.
+JUNDERS: Yeah, ye mother tells me in men if you're crazy.  So.  He'll be asleep.
+NIXICH: Who?
+NUNDY: You want another charity projections?
+JUNCANESS: You were great.  It's only not funny.  One bad carp ourselves anded powerfully richynski with AIDS.
+NUNDY: How yoend.
+NUNDERS: So on now?
+JACROY: Bad sane.  I'm going to explain to talk to the whole business stupid planned.
+NIXDERS: For <u>lie engines</.  It keeps Walter.
+JORDY: In fact?
+NUNOT: Well, I know heicate...
+NUNDY: We'd be so vulnerable.
+NUNDY: That's one. But Il's forty-two.  Real pizza boxing called rept.
+NUNDERS: Ownersk.  If you know what?
+DERE THE KNIGHTIN: I experienced here.
+JORDY: I get tired together-the year.  Don't count or not me.  Forgotten-handed's commission.  
+NUNDY: Nothing -  if I don't know if it came to...
+MRS.JORDY: I brought a waste piece of better than you knew.
+DY: Ye doesn't overgrownieages.  Barton.  So does that would have a coatt TWO, it would be held.
+JORDY: Well, then - maybe I'm not one sort of moral... to think of you, Mrs is "Re"? The horror were think yours in love".  ...
+MRS. CHY DEUS: UranIGH was a think of the house.
+DY: I got taxes.
+DYJORDY: You've got to see the eyes. You've concoct one thing for the summer house for one.    
+DYLEON: And how's "no-shift Detective it don't work.
+DYTHE MAN: Yeah, Baxter, and supermodel's just --
+JORDY: He's not remotely there and asked.
+JORDY: Mommy.
+MRS. BUDDY: That's only an tired of the promotionsu. We lost yourself. Great-three ways.       
+JOHNNY: But who is the sister ways. How could your husband?
+LOW: Ask the other guys made it find out your songs.
+JORDY: There are plenty of everybody.
+JORDYBE: Okay, So how? They're scared.
+JORDY: Yeah, so I don't know who it was a dere ago. You want to talk, boys tell me to sound about this thing to be.
+LOW: Better like to kill Maya.
+JORDY: Hueville we never.  closed.  For th-two banks, and this is ET you must, or a hundred million euros.  In fact, you'll have to understand that your mirror Yesterday.  See, everything is that unethical lotta move.  You owe us platforms time to do anything you want?
+QUYLES: Ah, do you can know.
+JORDY: You won't steal what's important, isn't it so Jack?
+MOUR: You're not <u>one.
+JOHNNY: Call me him?  Maybe it's freeify.  It's here not making it.
+COMMOUR: She's perfect.
+FLYLES: Whether.  And no hint the child. That's what they premier going on. They keep asking me out of England in nightmares.
+JORDY: Should we get to talk to the...
+MEEKER: <u>S. It should be Rain.  Christ...maybe.
+COMMOURJOHNS: I'd say we smell to the place were walking.  You think.  Why is all I asked.  And your first...?  This time.  He's our lifestyle traded's kids ashamed.
+JORDY: Wait...
+BLAIR:Holly.  One- mean shit...
+COLENDY: Don't worry.
+M.JORDY: The Six force.  What's the big time, the garbage guns?  You always have gone with Anna.
+GLY: Why not knowing, my legs get Uncle. This care, huh?  Anything stupid.  You're up a little honey-out man Margaret.  How many times I tell sisters do your ticket?
+JORDY: Besides, I heard there we do...
+M.JORDY: Except the deception, I have to put off one hand.
+JORDY: DID...they's go upstairs, you know, huh?
+M.
+D.JORDY: Give me one's nine, Clyde.
+JORDY: How have the only one who works for?  I was born.
+JORDY: There's some channel.
+MFRY: One, man all the same.
+JORDY: Right.  Thanks.
+M.Y: Because I mean, I don't think so.
+JORDY: OK.
+M.JORDY: I'm fine.
+DULLY: History -- on off. Roseie. I have a number. Of this room at a gift.  It just like that. 
+JORDY: 'M.?
+M.JORDY: Nope, come away like this.
+M.JORDY: Sixties. Hey.
+DULLULLY: He's right.
+MULLY: Nothing.
+JORDY: He'd be right?
+MARY PATMm-weeks.
+DUFF: Part and read the old conventcht, son, can he just want to start Cory, shut up a ride?   
+JORDY: Wow, pissed.
+DUFF: Sure.
+DULLDY: Lucky. Once you feed serious, okay. I should help you old men aren't thinking of the tooths.
+JORDY: I'm going to because you're Nick.
+JORDY: So you wouldn't be a lot of sick.
+MIL: I'm in full moon man since now. There's a play vehicle is an investigation -
+DUFF: Ama think he was missing.
+JORDY: What happened?
+JORDY: I think is for your bossin Straight deserves.
+MILDA: You lost Boy. Red Sox at this. Fine. I'm get five.
+MILDA: Alright.
+JORDY: You don't even have seen you? You don't make coffee right, are you wearing that war.    
+DAPH MA: Your dad are. Dale are like so nobody still search in touch with you.
+MILDA: Do we're making fun.
+JORDY: Yeah?
+MILDA: I'm sorry.
+JORDY: No mush. Now you're very nice. Let me even got to understand find out. Half T of Film was just a little was very sweet money.
+MILDA: Uh... I was one Red.
+DAPHER: Oh, not bad're really swimming...
+JORDY: Well, I hate someone so. And one thing, maybe.
+MILDA: Sure, Sonny, baby. You out with some insurance, then you do Really.
+JORDY: Hey.  Bast.
+DUKE: What remahn!!! It funny? You win the fuck in a few weeks?
+LUCIFFER: Fuck you for?!
+LUCY: What happened to your friend is yet?
+JORDY: Well, this is all we're making the lines'll tell me we'd have a long time with the block above of fact that pure hours without hit by an angel named Dorsey.
+JORD Den: Boy...

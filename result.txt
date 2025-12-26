@@ -1,0 +1,40 @@
+(.venv) PS C:\Users\yousef\workspace\dialogue-gpt> & C:/Users/yousef/workspace/dialogue-gpt/.venv/Scripts/python.exe c:/Users/yousef/workspace/dialogue-gpt/train.py
+Using device: cuda
+GPU: NVIDIA GeForce RTX 3050 Ti Laptop GPU
+VRAM: 4.00GB total
+step 0: train loss 4.9102, val loss 4.9099
+step 500: train loss 2.0395, val loss 2.0498
+step 1000: train loss 1.7492, val loss 1.7713
+step 1500: train loss 1.5869, val loss 1.6274
+step 2000: train loss 1.4997, val loss 1.5368
+step 2500: train loss 1.4337, val loss 1.4776
+step 3000: train loss 1.3861, val loss 1.4407
+step 3500: train loss 1.3553, val loss 1.4101
+step 4000: train loss 1.3262, val loss 1.3786
+step 4500: train loss 1.2939, val loss 1.3621
+step 5000: train loss 1.2777, val loss 1.3445
+step 5500: train loss 1.2643, val loss 1.3291
+step 6000: train loss 1.2453, val loss 1.3183
+step 6500: train loss 1.2377, val loss 1.3147
+step 7000: train loss 1.2264, val loss 1.3021
+step 7500: train loss 1.2190, val loss 1.3017
+         You can do Next listenia while and dearing.  Dick.
+CRAIDY: What we'd wear?
+CRAIG: Capter when you're the Nurse Sumber's talked about the same next.
+CRAIG: I can't see them going to accouraged or what I think! But believe. I can't The lind me! 
+CRAIG: It for long, how bad the pea sin. We must say sometimage I was you here to bought out of here of the nine Stan food she'll she watch an or so greet comes in the Nickking beautiful try she is introdumented when you got the house number when they'll eddit Tront Russ you do.      
+MAGGIE: Do you like we?
+MAGGIE: I'm hidda soldner was his own.  I can accidently always be wortht.  His name I'll everything.  You're hit Lee kill hard.  Everything accident.
+MAGGIE: Yes, she's a compains window being at the short.
+RINALDS: He's a HITCHERIUNG YOUNG YOUNG GUAL THE forger what he had talk.
+KORA: I wanted it to my moment to make it.
+BOBBY: Rinal Korar pricus.
+RINALDY: Set these's eyes.
+SURSTY: Wait - let's all super.
+SURSTY: He is a casa, I never come how it if I'm a junglie's a little neces.
+FRIDA: Now the most day, but what is sit down?
+RICHARDLER: Yes. Then we only one of the long onn, but Stybe is said to find the Mith and but I wanted if I meant I'm gonna do; two divording out Mrs. Raisertsa had my whole stuff. Thinks I'd really gonna be moved at the trust, if we need cat people when like guys on them. Actually there when we close the phostery wouldn't go in now it- exercely aralyzing. I put telling me them is him!
+JAKE: To water up with grammony. It was.
+RUSSEU: Pits through to exactly you. I'm just tellience you 'come about,' your penival, twelve's lately swamped.  "Fuck you willgoved them situde of the losson of people if it the dest signity of their new. You wouldn't understand before the thing is pone where they let thought spair, but don't swore.
+LUKE: It was in what I could be nothing -- don't become the next water I want to killed the office  --  That you'll be really!
+HOOELSEMAN: It's whenever the latitute, I'm hopin' 'cause

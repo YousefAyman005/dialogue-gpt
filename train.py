@@ -1,31 +1,61 @@
+import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import sentencepiece as spm
 
 # hyperparameters
 batch_size = 32 # how many independent sequences will we process in parallel?
-block_size = 8 # what is the maximum context length for predictions?
-max_iters = 5000
+block_size = 192 # increased back - smaller vocab uses less memory
+max_iters = 8000
 eval_interval = 500
-learning_rate = 1e-3
+learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
-n_embd = 32
+eval_iters = 100
+n_embd = 384  # can increase back with smaller vocab
+n_head = 6
+n_layers = 6
+dropout = 0.2
+VOCAB_SIZE = 8000  # Custom vocab size for BPE
 # ------------
+
+print(f"Using device: {device}")
+if device == 'cuda':
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory/1024**3:.2f}GB total")
 
 torch.manual_seed(1337)
 
 with open('data/movies/input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
-# here are all the unique characters that occur in this text
-chars = sorted(list(set(text)))
-vocab_size = len(chars)
-# create a mapping from characters to integers
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
-decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+# Train custom BPE tokenizer if it doesn't exist
+tokenizer_prefix = 'movie_tokenizer'
+if not os.path.exists(f'{tokenizer_prefix}.model'):
+    print(f"Training BPE tokenizer with vocab_size={VOCAB_SIZE}...")
+    spm.SentencePieceTrainer.train(
+        input='data/movies/input.txt',
+        model_prefix=tokenizer_prefix,
+        vocab_size=VOCAB_SIZE,
+        model_type='bpe',
+        character_coverage=1.0,
+        pad_id=0,
+        unk_id=1,
+        bos_id=2,
+        eos_id=3,
+    )
+    print("Tokenizer trained and saved!")
+else:
+    print(f"Loading existing tokenizer from {tokenizer_prefix}.model")
+
+# Load tokenizer
+sp = spm.SentencePieceProcessor()
+sp.load(f'{tokenizer_prefix}.model')
+
+encode = lambda s: sp.encode(s)
+decode = lambda l: sp.decode(l)
+vocab_size = sp.get_piece_size()
+print(f"Vocab size: {vocab_size}")
 
 # Train and test splits
 data = torch.tensor(encode(text), dtype=torch.long)
@@ -67,6 +97,8 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, x):
         B, T, C = x.shape
         k = self.key(x)   # (B,T,head_size)
@@ -76,6 +108,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5 # (B,T,T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1) # (B,T,T)
+        wei = self.dropout(wei)
         # perform the weighted aggregation of the values
         v = self.value(x) # (B,T,head_size)
 
@@ -90,10 +123,12 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         out = self.proj(out)
+        out = self.dropout(out)
         return out
 class FeedFoward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
@@ -102,8 +137,9 @@ class FeedFoward(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
@@ -132,11 +168,8 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.positional_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(
-            blocks(n_embd, 4),
-            blocks(n_embd, 4),
-            blocks(n_embd, 4),
-        )
+        self.blocks = nn.Sequential(*[blocks(n_embd, n_head=n_head) for _ in range(n_layers)])
+        self.ln_final = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -181,12 +214,36 @@ m = model.to(device)
 # create a PyTorch optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-for iter in range(max_iters):
+# Load checkpoint if exists
+checkpoint_path = 'checkpoint.pt'
+start_iter = 0
+if os.path.exists(checkpoint_path):
+    print(f"Loading checkpoint from {checkpoint_path}...")
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
+    model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    start_iter = checkpoint['iter'] + 1
+    print(f"Resumed from iteration {checkpoint['iter']} (train_loss: {checkpoint['train_loss']:.4f}, val_loss: {checkpoint['val_loss']:.4f})")
+else:
+    print("Starting fresh training...")
+
+for iter in range(start_iter, max_iters):
 
     # every once in a while evaluate the loss on train and val sets
-    if iter % eval_interval == 0:
+    if iter % eval_interval == 0 or iter == max_iters - 1:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        
+        # Save checkpoint
+        checkpoint = {
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'iter': iter,
+            'train_loss': losses['train'].item(),
+            'val_loss': losses['val'].item(),
+        }
+        torch.save(checkpoint, checkpoint_path)
+        print(f"Saved checkpoint at step {iter}")
 
     # sample a batch of data
     xb, yb = get_batch('train')
@@ -199,4 +256,4 @@ for iter in range(max_iters):
 
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+print(decode(m.generate(context, max_new_tokens=2000)[0].tolist()))

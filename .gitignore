@@ -1,0 +1,20 @@
+# PyTorch model weights / checkpoints
+checkpoint.pt
+*.pt
+*.pth
+*.bin
+
+# Tokenizer / vocabulary files
+movie_tokenizer.model
+movie_tokenizer.vocab
+
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Misc
+*.log
+*.csv
