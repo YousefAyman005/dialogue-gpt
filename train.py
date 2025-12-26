@@ -15,7 +15,7 @@ eval_iters = 100
 n_embd = 384  # can increase back with smaller vocab
 n_head = 6
 n_layers = 6
-dropout = 0.2
+dropout = 0.3
 # ------------
 
 print(f"Using device: {device}")
