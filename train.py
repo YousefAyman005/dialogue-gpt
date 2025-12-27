@@ -4,14 +4,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import tiktoken
-try:
-    import torch_xla.core.xla_model as xm
-    import torch_xla.distributed.xla_multiprocessing as xmp
-    _xla_available = True
-except ImportError:
-    xm = None
-    xmp = None
-    _xla_available = False
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 def _env_int(name, default):
     value = os.environ.get(name)
@@ -22,7 +16,7 @@ def _env_float(name, default):
     return float(value) if value is not None else default
 
 # hyperparameters
-batch_size = _env_int("BATCH_SIZE", 32) # per-core batch size
+batch_size = _env_int("BATCH_SIZE", 32) # per-GPU batch size
 block_size = _env_int("BLOCK_SIZE", 256)
 max_iters = _env_int("MAX_ITERS", 20000)
 eval_interval = _env_int("EVAL_INTERVAL", 1000)
@@ -37,23 +31,31 @@ n_head = _env_int("N_HEAD", 12)
 n_layers = _env_int("N_LAYERS", 8)
 ffn_mult = _env_int("FFN_MULT", 6)
 dropout = _env_float("DROPOUT", 0.2)
-tpu_cores = _env_int("TPU_NUM_CORES", 8)
 seed = _env_int("SEED", 1337)
 # ------------
 
 if n_embd % n_head != 0:
     raise ValueError(f"n_embd ({n_embd}) must be divisible by n_head ({n_head})")
 
-def _should_use_xla():
-    if not _xla_available:
-        return False
-    if os.environ.get("USE_TPU") == "1":
-        return True
-    return any(os.environ.get(name) for name in ("COLAB_TPU_ADDR", "TPU_NAME", "XRT_TPU_CONFIG"))
-
-use_xla = _should_use_xla()
 default_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device = default_device
+
+def _is_distributed():
+    return dist.is_available() and dist.is_initialized()
+
+def _rank():
+    return dist.get_rank() if _is_distributed() else 0
+
+def _world_size():
+    return dist.get_world_size() if _is_distributed() else 1
+
+def _print_master(message):
+    if _rank() == 0:
+        print(message)
+
+def _print_once(message):
+    if os.environ.get("RANK", "0") == "0":
+        print(message)
 
 with open('data/movies/input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
@@ -64,7 +66,7 @@ enc = tiktoken.get_encoding("gpt2")
 encode = lambda s: enc.encode(s, allowed_special={'<|endoftext|>'})
 decode = lambda l: enc.decode(l)
 vocab_size = enc.n_vocab
-print(f"Vocab size: {vocab_size}")
+_print_once(f"Vocab size: {vocab_size}")
 
 # Train and test splits
 data = torch.tensor(encode(text), dtype=torch.long)
@@ -241,36 +243,54 @@ def build_model():
 if __name__ != "__main__":
     model = build_model().to(device)
 
-def _is_master():
-    return (not use_xla) or xm.is_master_ordinal()
+def _require_two_gpu_ddp():
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for this script.")
+    num_gpus = torch.cuda.device_count()
+    if num_gpus < 2:
+        raise RuntimeError(f"Need 2 GPUs, found {num_gpus}.")
+    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
+        raise RuntimeError("Run with: torchrun --nproc_per_node=2 train.py")
+    dist.init_process_group(backend="nccl")
+    world_size = dist.get_world_size()
+    if world_size != 2:
+        raise RuntimeError(f"WORLD_SIZE must be 2, got {world_size}.")
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    return local_rank, world_size
 
 def _save_checkpoint(checkpoint, path):
-    if use_xla:
-        xm.save(checkpoint, path)
-    else:
-        torch.save(checkpoint, path)
+    torch.save(checkpoint, path)
 
-def _train_worker(index, num_cores):
-    if use_xla:
-        device = xm.xla_device()
-        print_fn = xm.master_print
-        world_size = num_cores
-        rank = xm.get_ordinal()
-        print_fn(f"TPU/XLA detected ({world_size} cores)")
-    else:
-        device = default_device
-        print_fn = print
-        world_size = 1
-        rank = 0
-        print_fn(f"Using device: {device}")
-        if device.type == 'cuda':
-            print_fn(f"GPU: {torch.cuda.get_device_name(0)}")
-            print_fn(f"VRAM: {torch.cuda.get_device_properties(0).total_memory/1024**3:.2f}GB total")
+if __name__ == "__main__":
+    local_rank, world_size = _require_two_gpu_ddp()
+    device = torch.device(f"cuda:{local_rank}")
+    torch.manual_seed(seed + local_rank)
 
-    torch.manual_seed(seed + rank)
-    print_fn(f"Effective batch size: {batch_size * world_size}")
+    _print_master("Using 2 GPUs with DDP")
+    _print_master(f"Effective batch size: {batch_size * world_size}")
 
     model = build_model().to(device)
+
+    # Load checkpoint if exists
+    checkpoint_path = 'checkpoint.pt'
+    start_iter = 0
+    checkpoint = None
+    if os.path.exists(checkpoint_path):
+        _print_master(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        try:
+            model.load_state_dict(checkpoint['model'])
+            start_iter = checkpoint['iter'] + 1
+            _print_master(f"Resumed from iteration {checkpoint['iter']} (train_loss: {checkpoint['train_loss']:.4f}, val_loss: {checkpoint['val_loss']:.4f})")
+        except RuntimeError as exc:
+            _print_master(f"Checkpoint incompatible with current model, starting fresh. ({exc})")
+            checkpoint = None
+    else:
+        _print_master("Starting fresh training...")
+
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+
     # create a PyTorch optimizer
     decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
     nodecay_params = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
@@ -281,23 +301,9 @@ def _train_worker(index, num_cores):
         ],
         lr=learning_rate,
     )
-
-    # Load checkpoint if exists
-    checkpoint_path = 'checkpoint.pt'
-    start_iter = 0
-    if os.path.exists(checkpoint_path):
-        print_fn(f"Loading checkpoint from {checkpoint_path}...")
-        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-        try:
-            model.load_state_dict(checkpoint['model'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            _move_optimizer_state(optimizer, device)
-            start_iter = checkpoint['iter'] + 1
-            print_fn(f"Resumed from iteration {checkpoint['iter']} (train_loss: {checkpoint['train_loss']:.4f}, val_loss: {checkpoint['val_loss']:.4f})")
-        except RuntimeError as exc:
-            print_fn(f"Checkpoint incompatible with current model, starting fresh. ({exc})")
-    else:
-        print_fn("Starting fresh training...")
+    if checkpoint is not None:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        _move_optimizer_state(optimizer, device)
 
     for iter in range(start_iter, max_iters):
         lr = get_lr(iter)
@@ -306,21 +312,21 @@ def _train_worker(index, num_cores):
 
         # every once in a while evaluate the loss on train and val sets
         if iter % eval_interval == 0 or iter == max_iters - 1:
-            losses = estimate_loss(model, device)
-            print_fn(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, lr {lr:.2e}")
-            
-            # Save checkpoint
-            if _is_master():
+            if _rank() == 0:
+                losses = estimate_loss(model, device)
+                _print_master(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, lr {lr:.2e}")
                 checkpoint = {
-                    'model': model.state_dict(),
+                    'model': model.module.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'iter': iter,
                     'lr': lr,
-                    'train_loss': losses['train'].item(),
-                    'val_loss': losses['val'].item(),
+                    'train_loss': losses['train'],
+                    'val_loss': losses['val'],
                 }
                 _save_checkpoint(checkpoint, checkpoint_path)
-                print_fn(f"Saved checkpoint at step {iter}")
+                _print_master(f"Saved checkpoint at step {iter}")
+            if _is_distributed():
+                dist.barrier()
 
         # sample a batch of data
         xb, yb = get_batch('train', device)
@@ -329,21 +335,12 @@ def _train_worker(index, num_cores):
         logits, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        if use_xla:
-            xm.optimizer_step(optimizer, barrier=True)
-            xm.mark_step()
-        else:
-            optimizer.step()
+        optimizer.step()
 
-    print_fn("\n" + "="*80)
-    print_fn("Training complete!")
-    print_fn(f"Final checkpoint saved to: {checkpoint_path}")
-    print_fn("="*80)
-    print_fn("\nTo generate text, run: python generate.py")
-    print_fn("For more options: python generate.py --help")
-
-if __name__ == "__main__":
-    if use_xla and xmp is not None:
-        xmp.spawn(_train_worker, args=(tpu_cores,), nprocs=tpu_cores, start_method='fork')
-    else:
-        _train_worker(0, 1)
+    _print_master("\n" + "="*80)
+    _print_master("Training complete!")
+    _print_master(f"Final checkpoint saved to: {checkpoint_path}")
+    _print_master("="*80)
+    _print_master("\nTo generate text, run: python generate.py")
+    _print_master("For more options: python generate.py --help")
+    dist.destroy_process_group()
