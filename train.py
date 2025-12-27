@@ -4,32 +4,56 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import tiktoken
+try:
+    import torch_xla.core.xla_model as xm
+    import torch_xla.distributed.xla_multiprocessing as xmp
+    _xla_available = True
+except ImportError:
+    xm = None
+    xmp = None
+    _xla_available = False
+
+def _env_int(name, default):
+    value = os.environ.get(name)
+    return int(value) if value is not None else default
+
+def _env_float(name, default):
+    value = os.environ.get(name)
+    return float(value) if value is not None else default
 
 # hyperparameters
-batch_size = 32 # how many independent sequences will we process in parallel?
-block_size = 192 # increased back - smaller vocab uses less memory
-max_iters = 8000
-eval_interval = 500
-learning_rate = 3e-4
-min_lr = 3e-5
-warmup_iters = 200
-lr_decay_iters = max_iters
-weight_decay = 0.1
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 100
-n_embd = 512  # wider embedding for more capacity
-n_head = 8
-n_layers = 6
-ffn_mult = 6
-dropout = 0.3
+batch_size = _env_int("BATCH_SIZE", 32) # per-core batch size
+block_size = _env_int("BLOCK_SIZE", 256)
+max_iters = _env_int("MAX_ITERS", 20000)
+eval_interval = _env_int("EVAL_INTERVAL", 1000)
+learning_rate = _env_float("LEARNING_RATE", 3e-4)
+min_lr = _env_float("MIN_LR", 3e-5)
+warmup_iters = _env_int("WARMUP_ITERS", 500)
+lr_decay_iters = _env_int("LR_DECAY_ITERS", max_iters)
+weight_decay = _env_float("WEIGHT_DECAY", 0.1)
+eval_iters = _env_int("EVAL_ITERS", 50)
+n_embd = _env_int("N_EMBD", 768)
+n_head = _env_int("N_HEAD", 12)
+n_layers = _env_int("N_LAYERS", 8)
+ffn_mult = _env_int("FFN_MULT", 6)
+dropout = _env_float("DROPOUT", 0.2)
+tpu_cores = _env_int("TPU_NUM_CORES", 8)
+seed = _env_int("SEED", 1337)
 # ------------
 
-print(f"Using device: {device}")
-if device == 'cuda':
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
-    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory/1024**3:.2f}GB total")
+if n_embd % n_head != 0:
+    raise ValueError(f"n_embd ({n_embd}) must be divisible by n_head ({n_head})")
 
-torch.manual_seed(1337)
+def _should_use_xla():
+    if not _xla_available:
+        return False
+    if os.environ.get("USE_TPU") == "1":
+        return True
+    return any(os.environ.get(name) for name in ("COLAB_TPU_ADDR", "TPU_NAME", "XRT_TPU_CONFIG"))
+
+use_xla = _should_use_xla()
+default_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = default_device
 
 with open('data/movies/input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
@@ -49,7 +73,7 @@ train_data = data[:n]
 val_data = data[n:]
 
 # data loading
-def get_batch(split):
+def get_batch(split, device):
     # generate a small batch of data of inputs x and targets y
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
@@ -59,16 +83,16 @@ def get_batch(split):
     return x, y
 
 @torch.no_grad()
-def estimate_loss():
+def estimate_loss(model, device):
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
+        losses = torch.zeros(eval_iters, device=device)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, Y = get_batch(split, device)
             logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
+            losses[k] = loss.detach()
+        out[split] = losses.mean().item()
     model.train()
     return out
 
@@ -81,6 +105,12 @@ def get_lr(it):
     decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (learning_rate - min_lr)
+
+def _move_optimizer_state(optimizer, device):
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
 
 class Head(nn.Module):
     """ one head of self-attention """
@@ -173,7 +203,7 @@ class BigramLanguageModel(nn.Module):
 
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
-        pos_emb = self.positional_embedding_table(torch.arange(T, device=device)) # (T,C)
+        pos_emb = self.positional_embedding_table(torch.arange(T, device=idx.device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
         x = self.blocks(x) # (B,T,C)
         x = self.ln_final(x)
@@ -205,10 +235,42 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
-model = BigramLanguageModel()
-m = model.to(device)
+def build_model():
+    return BigramLanguageModel()
 
-if __name__ == "__main__":
+if __name__ != "__main__":
+    model = build_model().to(device)
+
+def _is_master():
+    return (not use_xla) or xm.is_master_ordinal()
+
+def _save_checkpoint(checkpoint, path):
+    if use_xla:
+        xm.save(checkpoint, path)
+    else:
+        torch.save(checkpoint, path)
+
+def _train_worker(index, num_cores):
+    if use_xla:
+        device = xm.xla_device()
+        print_fn = xm.master_print
+        world_size = num_cores
+        rank = xm.get_ordinal()
+        print_fn(f"TPU/XLA detected ({world_size} cores)")
+    else:
+        device = default_device
+        print_fn = print
+        world_size = 1
+        rank = 0
+        print_fn(f"Using device: {device}")
+        if device.type == 'cuda':
+            print_fn(f"GPU: {torch.cuda.get_device_name(0)}")
+            print_fn(f"VRAM: {torch.cuda.get_device_properties(0).total_memory/1024**3:.2f}GB total")
+
+    torch.manual_seed(seed + rank)
+    print_fn(f"Effective batch size: {batch_size * world_size}")
+
+    model = build_model().to(device)
     # create a PyTorch optimizer
     decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
     nodecay_params = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
@@ -224,17 +286,18 @@ if __name__ == "__main__":
     checkpoint_path = 'checkpoint.pt'
     start_iter = 0
     if os.path.exists(checkpoint_path):
-        print(f"Loading checkpoint from {checkpoint_path}...")
-        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        print_fn(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         try:
             model.load_state_dict(checkpoint['model'])
             optimizer.load_state_dict(checkpoint['optimizer'])
+            _move_optimizer_state(optimizer, device)
             start_iter = checkpoint['iter'] + 1
-            print(f"Resumed from iteration {checkpoint['iter']} (train_loss: {checkpoint['train_loss']:.4f}, val_loss: {checkpoint['val_loss']:.4f})")
+            print_fn(f"Resumed from iteration {checkpoint['iter']} (train_loss: {checkpoint['train_loss']:.4f}, val_loss: {checkpoint['val_loss']:.4f})")
         except RuntimeError as exc:
-            print(f"Checkpoint incompatible with current model, starting fresh. ({exc})")
+            print_fn(f"Checkpoint incompatible with current model, starting fresh. ({exc})")
     else:
-        print("Starting fresh training...")
+        print_fn("Starting fresh training...")
 
     for iter in range(start_iter, max_iters):
         lr = get_lr(iter)
@@ -243,33 +306,44 @@ if __name__ == "__main__":
 
         # every once in a while evaluate the loss on train and val sets
         if iter % eval_interval == 0 or iter == max_iters - 1:
-            losses = estimate_loss()
-            print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, lr {lr:.2e}")
+            losses = estimate_loss(model, device)
+            print_fn(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, lr {lr:.2e}")
             
             # Save checkpoint
-            checkpoint = {
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'iter': iter,
-                'lr': lr,
-                'train_loss': losses['train'].item(),
-                'val_loss': losses['val'].item(),
-            }
-            torch.save(checkpoint, checkpoint_path)
-            print(f"Saved checkpoint at step {iter}")
+            if _is_master():
+                checkpoint = {
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'iter': iter,
+                    'lr': lr,
+                    'train_loss': losses['train'].item(),
+                    'val_loss': losses['val'].item(),
+                }
+                _save_checkpoint(checkpoint, checkpoint_path)
+                print_fn(f"Saved checkpoint at step {iter}")
 
         # sample a batch of data
-        xb, yb = get_batch('train')
+        xb, yb = get_batch('train', device)
 
         # evaluate the loss
         logits, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        optimizer.step()
+        if use_xla:
+            xm.optimizer_step(optimizer, barrier=True)
+            xm.mark_step()
+        else:
+            optimizer.step()
 
-    print("\n" + "="*80)
-    print("Training complete!")
-    print(f"Final checkpoint saved to: {checkpoint_path}")
-    print("="*80)
-    print("\nTo generate text, run: python generate.py")
-    print("For more options: python generate.py --help")
+    print_fn("\n" + "="*80)
+    print_fn("Training complete!")
+    print_fn(f"Final checkpoint saved to: {checkpoint_path}")
+    print_fn("="*80)
+    print_fn("\nTo generate text, run: python generate.py")
+    print_fn("For more options: python generate.py --help")
+
+if __name__ == "__main__":
+    if use_xla and xmp is not None:
+        xmp.spawn(_train_worker, args=(tpu_cores,), nprocs=tpu_cores, start_method='fork')
+    else:
+        _train_worker(0, 1)
