@@ -1,3 +1,4 @@
+import math
 import os
 import torch
 import torch.nn as nn
@@ -10,11 +11,16 @@ block_size = 192 # increased back - smaller vocab uses less memory
 max_iters = 8000
 eval_interval = 500
 learning_rate = 3e-4
+min_lr = 3e-5
+warmup_iters = 200
+lr_decay_iters = max_iters
+weight_decay = 0.1
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 100
-n_embd = 384  # can increase back with smaller vocab
-n_head = 6
+n_embd = 512  # wider embedding for more capacity
+n_head = 8
 n_layers = 6
+ffn_mult = 6
 dropout = 0.3
 # ------------
 
@@ -66,6 +72,16 @@ def estimate_loss():
     model.train()
     return out
 
+def get_lr(it):
+    # Linear warmup then cosine decay.
+    if it < warmup_iters:
+        return learning_rate * it / warmup_iters
+    if it > lr_decay_iters:
+        return min_lr
+    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (learning_rate - min_lr)
+
 class Head(nn.Module):
     """ one head of self-attention """
 
@@ -84,7 +100,7 @@ class Head(nn.Module):
         q = self.query(x) # (B,T,head_size)
 
         # compute attention scores ("affinities")
-        wei = q @ k.transpose(-2, -1) * C**-0.5 # (B,T,T)
+        wei = q @ k.transpose(-2, -1) * (q.size(-1) ** -0.5) # (B,T,T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1) # (B,T,T)
         wei = self.dropout(wei)
@@ -112,12 +128,13 @@ class MultiHeadAttention(nn.Module):
 class FeedFoward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
-    def __init__(self, n_embd):
+    def __init__(self, n_embd, ffn_mult):
         super().__init__()
+        hidden_dim = ffn_mult * n_embd
         self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
+            nn.Linear(n_embd, hidden_dim),
             nn.GELU(),
-            nn.Linear(4 * n_embd, n_embd),
+            nn.Linear(hidden_dim, n_embd),
             nn.Dropout(dropout),
         )
 
@@ -131,7 +148,7 @@ class blocks(nn.Module):
         super().__init__()
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
-        self.ffwd = FeedFoward(n_embd)
+        self.ffwd = FeedFoward(n_embd, ffn_mult)
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
 
@@ -159,6 +176,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.positional_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
         x = self.blocks(x) # (B,T,C)
+        x = self.ln_final(x)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
         if targets is None:
@@ -192,7 +210,15 @@ m = model.to(device)
 
 if __name__ == "__main__":
     # create a PyTorch optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
+    nodecay_params = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
+    optimizer = torch.optim.AdamW(
+        [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0},
+        ],
+        lr=learning_rate,
+    )
 
     # Load checkpoint if exists
     checkpoint_path = 'checkpoint.pt'
@@ -200,25 +226,32 @@ if __name__ == "__main__":
     if os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from {checkpoint_path}...")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
-        model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        start_iter = checkpoint['iter'] + 1
-        print(f"Resumed from iteration {checkpoint['iter']} (train_loss: {checkpoint['train_loss']:.4f}, val_loss: {checkpoint['val_loss']:.4f})")
+        try:
+            model.load_state_dict(checkpoint['model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            start_iter = checkpoint['iter'] + 1
+            print(f"Resumed from iteration {checkpoint['iter']} (train_loss: {checkpoint['train_loss']:.4f}, val_loss: {checkpoint['val_loss']:.4f})")
+        except RuntimeError as exc:
+            print(f"Checkpoint incompatible with current model, starting fresh. ({exc})")
     else:
         print("Starting fresh training...")
 
     for iter in range(start_iter, max_iters):
+        lr = get_lr(iter)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
 
         # every once in a while evaluate the loss on train and val sets
         if iter % eval_interval == 0 or iter == max_iters - 1:
             losses = estimate_loss()
-            print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, lr {lr:.2e}")
             
             # Save checkpoint
             checkpoint = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'iter': iter,
+                'lr': lr,
                 'train_loss': losses['train'].item(),
                 'val_loss': losses['val'].item(),
             }
