@@ -177,18 +177,19 @@ def estimate_loss(model, ctx_data):
 # --- WORKER FUNCTION ---
 def _train_worker(index):
     # 1. Setup Device
-    # 'index' IS the rank (0-7), so we don't need xm.get_ordinal()
-    rank = index 
+    # We use the top-level torch_xla module, NOT xm
+    device = torch_xla.device() 
     
-    # Fix the deprecation warning (use xm.device instead of xla_device)
-    device = xm.device() 
+    # 'index' from spawn is our rank (0-7)
+    rank = index 
     
     print(f"Core {rank} active on {device}")
     
-    # 2. Sync Seeds for reproducibility
+    # 2. Sync Seeds
     torch.manual_seed(1337 + rank)
 
     # 3. Move Data to TPU
+    # (Ensure _train_data and _val_data are global or passed in)
     ctx_data = {
         'train': _train_data.to(device),
         'val': _val_data.to(device)
@@ -208,16 +209,17 @@ def _train_worker(index):
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         
-        # XLA Step: Syncs gradients and executes the graph
+        # XLA Step
         xm.optimizer_step(optimizer)
 
         if iter % eval_interval == 0:
             losses = estimate_loss(model, ctx_data)
             
-            # ONLY Rank 0 (Master) prints and saves
+            # Only Master (Rank 0) prints
             if rank == 0:
                 print(f"Step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
                 xm.save(model.state_dict(), 'checkpoint.pth')
+                
 # --- MAIN EXECUTION ---
 if __name__ == '__main__':
     # Load data once in the main process
