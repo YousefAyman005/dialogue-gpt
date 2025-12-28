@@ -359,6 +359,7 @@ def _train_worker(index, num_cores):
 
 if __name__ == "__main__":
     if use_xla and xmp is not None:
-        xmp.spawn(_train_worker, args=(tpu_cores,), nprocs=tpu_cores, start_method='fork')
+        # Use None to let XLA detect all available TPU cores automatically
+        xmp.spawn(_train_worker, args=(tpu_cores,), nprocs=None, start_method='fork')
     else:
         _train_worker(0, 1)
