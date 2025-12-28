@@ -34,9 +34,9 @@ weight_decay = _env_float("WEIGHT_DECAY", 0.1)
 eval_iters = _env_int("EVAL_ITERS", 50)
 n_embd = _env_int("N_EMBD", 768)
 n_head = _env_int("N_HEAD", 12)
-n_layers = _env_int("N_LAYERS", 8)
-ffn_mult = _env_int("FFN_MULT", 6)
-dropout = _env_float("DROPOUT", 0.2)
+n_layers = _env_int("N_LAYERS", 9)
+ffn_mult = _env_int("FFN_MULT", 8)
+dropout = _env_float("DROPOUT", 0.3)
 tpu_cores = _env_int("TPU_NUM_CORES", 8)
 seed = _env_int("SEED", 1337)
 # ------------
@@ -48,6 +48,8 @@ def _should_use_xla():
     if not _xla_available:
         return False
     if os.environ.get("USE_TPU") == "1":
+        return True
+    if os.environ.get("PJRT_DEVICE", "").upper() == "TPU":
         return True
     return any(os.environ.get(name) for name in ("COLAB_TPU_ADDR", "TPU_NAME", "XRT_TPU_CONFIG"))
 
@@ -76,10 +78,17 @@ val_data = data[n:]
 def get_batch(split, device):
     # generate a small batch of data of inputs x and targets y
     data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
+    max_start = len(data) - block_size
+    if max_start <= 0:
+        raise ValueError("block_size must be smaller than the dataset length.")
+    data_device = data.device
+    ix = torch.randint(0, max_start, (batch_size,), device=data_device)
+    offsets = torch.arange(block_size, device=data_device)
+    x = data[ix[:, None] + offsets]
+    y = data[ix[:, None] + offsets + 1]
+    if data_device != device:
+        x = x.to(device)
+        y = y.to(device)
     return x, y
 
 @torch.no_grad()
@@ -270,6 +279,12 @@ def _train_worker(index, num_cores):
     torch.manual_seed(seed + rank)
     print_fn(f"Effective batch size: {batch_size * world_size}")
 
+    global train_data, val_data
+    if use_xla:
+        # Keep the dataset on-device to avoid per-step host->device copies on XLA.
+        train_data = train_data.to(device)
+        val_data = val_data.to(device)
+
     model = build_model().to(device)
     # create a PyTorch optimizer
     decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
@@ -316,8 +331,8 @@ def _train_worker(index, num_cores):
                     'optimizer': optimizer.state_dict(),
                     'iter': iter,
                     'lr': lr,
-                    'train_loss': losses['train'].item(),
-                    'val_loss': losses['val'].item(),
+                    'train_loss': losses['train'],
+                    'val_loss': losses['val'],
                 }
                 _save_checkpoint(checkpoint, checkpoint_path)
                 print_fn(f"Saved checkpoint at step {iter}")
