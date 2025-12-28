@@ -226,6 +226,6 @@ if __name__ == '__main__':
     
     if _xla_available:
         print("🚀 Launching on TPU v5e-8...")
-        xmp.spawn(_train_worker, args=(), nprocs=8, start_method='fork')
+        xmp.spawn(_train_worker, args=(), nprocs=None, start_method='fork') # ✅ Correct
     else:
         print("❌ TPU not found. Check environment.")
