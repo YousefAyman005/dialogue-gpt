@@ -4,13 +4,30 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import tiktoken
+
+# Setup TPU environment for Kaggle BEFORE importing torch_xla
+def _setup_tpu_env():
+    """Configure environment variables for Kaggle TPU."""
+    # Check if we're on Kaggle with TPU
+    if os.path.exists('/kaggle'):
+        # Set PJRT runtime for Kaggle TPUs
+        os.environ.setdefault('PJRT_DEVICE', 'TPU')
+        # Disable TensorFlow warnings about torch-xla conflict
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+_setup_tpu_env()
+
 try:
+    import torch_xla
     import torch_xla.core.xla_model as xm
     import torch_xla.distributed.xla_multiprocessing as xmp
+    import torch_xla.distributed.parallel_loader as pl
     _xla_available = True
 except ImportError:
+    torch_xla = None
     xm = None
     xmp = None
+    pl = None
     _xla_available = False
 
 def _env_int(name, default):
@@ -50,6 +67,9 @@ def _should_use_xla():
     if os.environ.get("USE_TPU") == "1":
         return True
     if os.environ.get("PJRT_DEVICE", "").upper() == "TPU":
+        return True
+    # Check for Kaggle TPU environment
+    if os.path.exists('/kaggle') and os.path.exists('/dev/accel0'):
         return True
     return any(os.environ.get(name) for name in ("COLAB_TPU_ADDR", "TPU_NAME", "XRT_TPU_CONFIG"))
 
@@ -359,7 +379,8 @@ def _train_worker(index, num_cores):
 
 if __name__ == "__main__":
     if use_xla and xmp is not None:
-        # Use None to let XLA detect all available TPU cores automatically
-        xmp.spawn(_train_worker, args=(tpu_cores,), nprocs=None, start_method='fork')
+        # For Kaggle TPU v3-8, use spawn method instead of fork
+        # Also explicitly set nprocs=8 for 8-core TPU
+        xmp.spawn(_train_worker, args=(tpu_cores,), nprocs=tpu_cores, start_method='spawn')
     else:
         _train_worker(0, 1)
