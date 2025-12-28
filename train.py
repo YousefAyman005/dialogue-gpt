@@ -68,6 +68,14 @@ def _should_use_xla():
 use_xla = _should_use_xla()
 default_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+def _log_initial_device():
+    if use_xla:
+        pjrt = os.environ.get("PJRT_DEVICE", "").upper() or "unset"
+        tpu_cores_env = os.environ.get("TPU_NUM_CORES", "unset")
+        print(f"Initial device selection: XLA/TPU (PJRT_DEVICE={pjrt}, TPU_NUM_CORES={tpu_cores_env})")
+    else:
+        print(f"Initial device selection: {default_device}")
+
 # Global variables for data - will be initialized in main process only
 _train_data = None
 _val_data = None
@@ -349,6 +357,7 @@ def main():
     global _train_data, _val_data, _vocab_size
     
     # Load data in main process only
+    _log_initial_device()
     _vocab_size = _load_data()
     print(f"Vocab size: {_vocab_size}")
     
