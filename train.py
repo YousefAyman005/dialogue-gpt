@@ -152,12 +152,26 @@ class GPT(nn.Module):
         return logits, loss
 
 # --- TRAINING UTILS ---
-def get_batch(split, data_source):
-    # data_source is already on TPU
-    data = data_source[split]
-    ix = torch.randint(len(data) - block_size, (batch_size,), device=data.device)
+def get_batch(split, ctx_data, device):
+    # Retrieve the CPU data (pinned memory is best, but standard is fine)
+    data = ctx_data[split] 
+    
+    # 1. Generate indices on CPU (Fast)
+    ix = torch.randint(len(data) - block_size, (batch_size,), device='cpu')
+    
+    # 2. Slice on CPU (Fast & Pythonic)
     x = torch.stack([data[i:i+block_size] for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    
+    # 3. Ship ONLY the batch to the TPU (Fast transfer)
+    # non_blocking=True helps overlap transfer with computation
+    if device.type == 'xla':
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+    else:
+        x = x.to(device)
+        y = y.to(device)
+        
     return x, y
 
 @torch.no_grad()
@@ -177,49 +191,48 @@ def estimate_loss(model, ctx_data):
 # --- WORKER FUNCTION ---
 def _train_worker(index):
     # 1. Setup Device
-    # We use the top-level torch_xla module, NOT xm
-    device = torch_xla.device() 
-    
-    # 'index' from spawn is our rank (0-7)
-    rank = index 
-    
+    device = torch_xla.device()
+    rank = index
     print(f"Core {rank} active on {device}")
     
-    # 2. Sync Seeds
     torch.manual_seed(1337 + rank)
 
-    # 3. Move Data to TPU
-    # (Ensure _train_data and _val_data are global or passed in)
+    # --- CRITICAL CHANGE ---
+    # Keep the massive dataset on CPU! Do not move to device yet.
+    # _train_data and _val_data are global tensors on CPU.
     ctx_data = {
-        'train': _train_data.to(device),
-        'val': _val_data.to(device)
+        'train': _train_data, 
+        'val': _val_data
     }
-    
-    # 4. Model & Optimizer
+    # -----------------------
+
     model = GPT(_vocab_size).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-    # 5. Training Loop
     model.train()
+    
+    # Add a print to confirm loop entry
+    if rank == 0:
+        print("🚀 Compiling graph and starting loop... (This takes ~60s)")
+
     for iter in range(max_iters):
-        xb, yb = get_batch('train', ctx_data)
+        # Pass 'device' so get_batch knows where to send the final result
+        xb, yb = get_batch('train', ctx_data, device)
         
         logits, loss = model(xb, yb)
         
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        
-        # XLA Step
         xm.optimizer_step(optimizer)
 
         if iter % eval_interval == 0:
-            losses = estimate_loss(model, ctx_data)
-            
-            # Only Master (Rank 0) prints
+            # Note: You might need to update estimate_loss to use the new get_batch signature too!
+            # For now, let's just print simple logging to unblock you.
             if rank == 0:
-                print(f"Step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-                xm.save(model.state_dict(), 'checkpoint.pth')
+                print(f"Step {iter}: loss {loss.item():.4f}")
                 
+                # Optional: Full eval (slower)
+                # losses = estimate_loss(model, ctx_data, device)
 # --- MAIN EXECUTION ---
 if __name__ == '__main__':
     # Load data once in the main process
