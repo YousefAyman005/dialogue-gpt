@@ -3,16 +3,12 @@ import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import tiktoken
 
 # Setup TPU environment for Kaggle BEFORE importing torch_xla
 def _setup_tpu_env():
     """Configure environment variables for Kaggle TPU."""
-    # Check if we're on Kaggle with TPU
     if os.path.exists('/kaggle'):
-        # Set PJRT runtime for Kaggle TPUs
         os.environ.setdefault('PJRT_DEVICE', 'TPU')
-        # Disable TensorFlow warnings about torch-xla conflict
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 _setup_tpu_env()
@@ -21,13 +17,11 @@ try:
     import torch_xla
     import torch_xla.core.xla_model as xm
     import torch_xla.distributed.xla_multiprocessing as xmp
-    import torch_xla.distributed.parallel_loader as pl
     _xla_available = True
 except ImportError:
     torch_xla = None
     xm = None
     xmp = None
-    pl = None
     _xla_available = False
 
 def _env_int(name, default):
@@ -39,7 +33,7 @@ def _env_float(name, default):
     return float(value) if value is not None else default
 
 # hyperparameters
-batch_size = _env_int("BATCH_SIZE", 32) # per-core batch size
+batch_size = _env_int("BATCH_SIZE", 32)
 block_size = _env_int("BLOCK_SIZE", 256)
 max_iters = _env_int("MAX_ITERS", 20000)
 eval_interval = _env_int("EVAL_INTERVAL", 1000)
@@ -56,7 +50,6 @@ ffn_mult = _env_int("FFN_MULT", 8)
 dropout = _env_float("DROPOUT", 0.3)
 tpu_cores = _env_int("TPU_NUM_CORES", 8)
 seed = _env_int("SEED", 1337)
-# ------------
 
 if n_embd % n_head != 0:
     raise ValueError(f"n_embd ({n_embd}) must be divisible by n_head ({n_head})")
@@ -68,35 +61,40 @@ def _should_use_xla():
         return True
     if os.environ.get("PJRT_DEVICE", "").upper() == "TPU":
         return True
-    # Check for Kaggle TPU environment
     if os.path.exists('/kaggle') and os.path.exists('/dev/accel0'):
         return True
     return any(os.environ.get(name) for name in ("COLAB_TPU_ADDR", "TPU_NAME", "XRT_TPU_CONFIG"))
 
 use_xla = _should_use_xla()
 default_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device = default_device
 
-with open('data/movies/input.txt', 'r', encoding='utf-8') as f:
-    text = f.read()
+# Global variables for data - will be initialized in main process only
+_train_data = None
+_val_data = None
+_vocab_size = None
+_enc = None
 
-# Initialize tiktoken encoder (using GPT-2 encoding)
-enc = tiktoken.get_encoding("gpt2")
+def _load_data():
+    """Load and prepare the dataset. Called once in main process."""
+    global _train_data, _val_data, _vocab_size, _enc
+    
+    import tiktoken
+    
+    with open('data/movies/input.txt', 'r', encoding='utf-8') as f:
+        text = f.read()
+    
+    _enc = tiktoken.get_encoding("gpt2")
+    _vocab_size = _enc.n_vocab
+    
+    encode = lambda s: _enc.encode(s, allowed_special={'<|endoftext|>'})
+    data = torch.tensor(encode(text), dtype=torch.long)
+    n = int(0.9 * len(data))
+    _train_data = data[:n]
+    _val_data = data[n:]
+    
+    return _vocab_size
 
-encode = lambda s: enc.encode(s, allowed_special={'<|endoftext|>'})
-decode = lambda l: enc.decode(l)
-vocab_size = enc.n_vocab
-print(f"Vocab size: {vocab_size}")
-
-# Train and test splits
-data = torch.tensor(encode(text), dtype=torch.long)
-n = int(0.9*len(data)) # first 90% will be train, rest val
-train_data = data[:n]
-val_data = data[n:]
-
-# data loading
-def get_batch(split, device):
-    # generate a small batch of data of inputs x and targets y
+def get_batch(split, device, train_data, val_data):
     data = train_data if split == 'train' else val_data
     max_start = len(data) - block_size
     if max_start <= 0:
@@ -112,13 +110,13 @@ def get_batch(split, device):
     return x, y
 
 @torch.no_grad()
-def estimate_loss(model, device):
+def estimate_loss(model, device, train_data, val_data):
     out = {}
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters, device=device)
         for k in range(eval_iters):
-            X, Y = get_batch(split, device)
+            X, Y = get_batch(split, device, train_data, val_data)
             logits, loss = model(X, Y)
             losses[k] = loss.detach()
         out[split] = losses.mean().item()
@@ -126,7 +124,6 @@ def estimate_loss(model, device):
     return out
 
 def get_lr(it):
-    # Linear warmup then cosine decay.
     if it < warmup_iters:
         return learning_rate * it / warmup_iters
     if it > lr_decay_iters:
@@ -142,40 +139,30 @@ def _move_optimizer_state(optimizer, device):
                 state[key] = value.to(device)
 
 class Head(nn.Module):
-    """ one head of self-attention """
-
-    def __init__(self, head_size):
+    def __init__(self, head_size, vocab_size):
         super().__init__()
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
-
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         B, T, C = x.shape
-        k = self.key(x)   # (B,T,head_size)
-        q = self.query(x) # (B,T,head_size)
-
-        # compute attention scores ("affinities")
-        wei = q @ k.transpose(-2, -1) * (q.size(-1) ** -0.5) # (B,T,T)
+        k = self.key(x)
+        q = self.query(x)
+        wei = q @ k.transpose(-2, -1) * (q.size(-1) ** -0.5)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
-        wei = F.softmax(wei, dim=-1) # (B,T,T)
+        wei = F.softmax(wei, dim=-1)
         wei = self.dropout(wei)
-        # perform the weighted aggregation of the values
-        v = self.value(x) # (B,T,head_size)
-
-        out = wei @ v # (B,T,head_size)
+        v = self.value(x)
+        out = wei @ v
         return out
-    
 
 class MultiHeadAttention(nn.Module):
-    """ multiple heads of self-attention in parallel """
-
-    def __init__(self, num_heads, head_size):
+    def __init__(self, num_heads, head_size, vocab_size):
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.heads = nn.ModuleList([Head(head_size, vocab_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
         self.dropout = nn.Dropout(dropout)
 
@@ -184,9 +171,8 @@ class MultiHeadAttention(nn.Module):
         out = self.proj(out)
         out = self.dropout(out)
         return out
-class FeedFoward(nn.Module):
-    """ a simple linear layer followed by a non-linearity """
 
+class FeedFoward(nn.Module):
     def __init__(self, n_embd, ffn_mult):
         super().__init__()
         hidden_dim = ffn_mult * n_embd
@@ -199,14 +185,12 @@ class FeedFoward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-    
-class blocks(nn.Module):
-    """ Transformer block: communication followed by computation """
 
-    def __init__(self, n_embd, n_head):
+class blocks(nn.Module):
+    def __init__(self, n_embd, n_head, vocab_size):
         super().__init__()
         head_size = n_embd // n_head
-        self.sa = MultiHeadAttention(n_head, head_size)
+        self.sa = MultiHeadAttention(n_head, head_size, vocab_size)
         self.ffwd = FeedFoward(n_embd, ffn_mult)
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
@@ -214,29 +198,25 @@ class blocks(nn.Module):
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
-        return x    
-# super simple bigram model
-class BigramLanguageModel(nn.Module):
+        return x
 
-    def __init__(self):
+class BigramLanguageModel(nn.Module):
+    def __init__(self, vocab_size):
         super().__init__()
-        # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.positional_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[blocks(n_embd, n_head=n_head) for _ in range(n_layers)])
+        self.blocks = nn.Sequential(*[blocks(n_embd, n_head=n_head, vocab_size=vocab_size) for _ in range(n_layers)])
         self.ln_final = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
-
-        # idx and targets are both (B,T) tensor of integers
-        tok_emb = self.token_embedding_table(idx) # (B,T,C)
-        pos_emb = self.positional_embedding_table(torch.arange(T, device=idx.device)) # (T,C)
-        x = tok_emb + pos_emb # (B,T,C)
-        x = self.blocks(x) # (B,T,C)
+        tok_emb = self.token_embedding_table(idx)
+        pos_emb = self.positional_embedding_table(torch.arange(T, device=idx.device))
+        x = tok_emb + pos_emb
+        x = self.blocks(x)
         x = self.ln_final(x)
-        logits = self.lm_head(x) # (B,T,vocab_size)
+        logits = self.lm_head(x)
 
         if targets is None:
             loss = None
@@ -249,26 +229,17 @@ class BigramLanguageModel(nn.Module):
         return logits, loss
 
     def generate(self, idx, max_new_tokens):
-        # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -block_size:] # crop to the last block_size tokens
-            # get the predictions
+            idx_cond = idx[:, -block_size:]
             logits, loss = self(idx_cond)
-            # focus only on the last time step
-            logits = logits[:, -1, :] # becomes (B, C)
-            # apply softmax to get probabilities
-            probs = F.softmax(logits, dim=-1) # (B, C)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
-            # append sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+            logits = logits[:, -1, :]
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
         return idx
 
-def build_model():
-    return BigramLanguageModel()
-
-if __name__ != "__main__":
-    model = build_model().to(device)
+def build_model(vocab_size):
+    return BigramLanguageModel(vocab_size)
 
 def _is_master():
     return (not use_xla) or xm.is_master_ordinal()
@@ -279,11 +250,14 @@ def _save_checkpoint(checkpoint, path):
     else:
         torch.save(checkpoint, path)
 
-def _train_worker(index, num_cores):
+def _train_worker(index):
+    """Training worker function for TPU multiprocessing."""
+    global _train_data, _val_data, _vocab_size
+    
     if use_xla:
         device = xm.xla_device()
         print_fn = xm.master_print
-        world_size = num_cores
+        world_size = xm.xrt_world_size()
         rank = xm.get_ordinal()
         print_fn(f"TPU/XLA detected ({world_size} cores)")
     else:
@@ -297,16 +271,15 @@ def _train_worker(index, num_cores):
             print_fn(f"VRAM: {torch.cuda.get_device_properties(0).total_memory/1024**3:.2f}GB total")
 
     torch.manual_seed(seed + rank)
+    print_fn(f"Vocab size: {_vocab_size}")
     print_fn(f"Effective batch size: {batch_size * world_size}")
 
-    global train_data, val_data
-    if use_xla:
-        # Keep the dataset on-device to avoid per-step host->device copies on XLA.
-        train_data = train_data.to(device)
-        val_data = val_data.to(device)
+    # Move data to device
+    train_data = _train_data.to(device)
+    val_data = _val_data.to(device)
 
-    model = build_model().to(device)
-    # create a PyTorch optimizer
+    model = build_model(_vocab_size).to(device)
+    
     decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
     nodecay_params = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
     optimizer = torch.optim.AdamW(
@@ -317,7 +290,6 @@ def _train_worker(index, num_cores):
         lr=learning_rate,
     )
 
-    # Load checkpoint if exists
     checkpoint_path = 'checkpoint.pt'
     start_iter = 0
     if os.path.exists(checkpoint_path):
@@ -339,12 +311,10 @@ def _train_worker(index, num_cores):
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
-        # every once in a while evaluate the loss on train and val sets
         if iter % eval_interval == 0 or iter == max_iters - 1:
-            losses = estimate_loss(model, device)
+            losses = estimate_loss(model, device, train_data, val_data)
             print_fn(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, lr {lr:.2e}")
             
-            # Save checkpoint
             if _is_master():
                 checkpoint = {
                     'model': model.state_dict(),
@@ -357,15 +327,13 @@ def _train_worker(index, num_cores):
                 _save_checkpoint(checkpoint, checkpoint_path)
                 print_fn(f"Saved checkpoint at step {iter}")
 
-        # sample a batch of data
-        xb, yb = get_batch('train', device)
-
-        # evaluate the loss
+        xb, yb = get_batch('train', device, train_data, val_data)
         logits, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        
         if use_xla:
-            xm.optimizer_step(optimizer, barrier=True)
+            xm.optimizer_step(optimizer)
             xm.mark_step()
         else:
             optimizer.step()
@@ -377,10 +345,18 @@ def _train_worker(index, num_cores):
     print_fn("\nTo generate text, run: python generate.py")
     print_fn("For more options: python generate.py --help")
 
-if __name__ == "__main__":
+def main():
+    global _train_data, _val_data, _vocab_size
+    
+    # Load data in main process only
+    _vocab_size = _load_data()
+    print(f"Vocab size: {_vocab_size}")
+    
     if use_xla and xmp is not None:
-        # For Kaggle TPU, let XLA auto-detect all available devices
-        # Use spawn method for proper multiprocessing
-        xmp.spawn(_train_worker, args=(tpu_cores,), start_method='spawn')
+        # For TPU: use spawn to create worker processes
+        xmp.spawn(_train_worker, args=())
     else:
-        _train_worker(0, 1)
+        _train_worker(0)
+
+if __name__ == "__main__":
+    main()
