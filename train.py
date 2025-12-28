@@ -379,8 +379,8 @@ def _train_worker(index, num_cores):
 
 if __name__ == "__main__":
     if use_xla and xmp is not None:
-        # For Kaggle TPU v3-8, use spawn method instead of fork
-        # Also explicitly set nprocs=8 for 8-core TPU
-        xmp.spawn(_train_worker, args=(tpu_cores,), nprocs=tpu_cores, start_method='spawn')
+        # For Kaggle TPU, let XLA auto-detect all available devices
+        # Use spawn method for proper multiprocessing
+        xmp.spawn(_train_worker, args=(tpu_cores,), start_method='spawn')
     else:
         _train_worker(0, 1)
