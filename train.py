@@ -1,62 +1,51 @@
-import math
 import os
-import sys
+import time
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-# --- STEP 1: ROBUST ENVIRONMENT SETUP ---
+# --- 1. ENVIRONMENT SETUP ---
 def _setup_tpu_env():
-    """Forces Kaggle/Colab to see all 8 TPU cores."""
-    if 'kaggle' in os.environ.get('KAGGLE_URL_BASE', '') or os.path.exists('/kaggle'):
-        os.environ.setdefault('PJRT_DEVICE', 'TPU')
-        # Remove the variables that cause the "1 vs 8 cores" crash
-        for key in ["TPU_PROCESS_ADDRESSES", "CLOUD_TPU_TASK_ID"]:
-            if key in os.environ:
-                os.environ.pop(key)
+    # Critical for v5e stability
+    os.environ["PJRT_DEVICE"] = "TPU"
+    os.environ["XLA_USE_BF16"] = "1" # Use BFloat16 (Native to TPU)
+    
+    # Remove conflicting variables
+    for key in ["TPU_PROCESS_ADDRESSES", "CLOUD_TPU_TASK_ID"]:
+        if key in os.environ:
+            os.environ.pop(key)
 
 _setup_tpu_env()
 
-# --- STEP 2: IMPORT XLA ---
-try:
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-    import torch_xla.distributed.xla_multiprocessing as xmp
-    _xla_available = True
-except ImportError:
-    _xla_available = False
-    print("⚠️ WARNING: torch_xla not found. Running on CPU/GPU.")
+import torch_xla
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.xla_multiprocessing as xmp
 
-# Helper to get env vars safely
-def _env_int(name, default): return int(os.environ.get(name, default))
-def _env_float(name, default): return float(os.environ.get(name, default))
+# --- 2. HYPERPARAMETERS ---
+batch_size = 32      # Per core
+block_size = 256
+max_iters = 5000
+learning_rate = 3e-4
+eval_interval = 200  # Check validation every 200 steps
+eval_iters = 20      # Look at 20 batches to estimate loss
+n_embd = 384
+n_head = 6
+n_layers = 6
+dropout = 0.2
 
-# --- HYPERPARAMETERS ---
-batch_size = _env_int("BATCH_SIZE", 64) # Increased for TPU efficiency
-block_size = _env_int("BLOCK_SIZE", 256)
-max_iters = _env_int("MAX_ITERS", 5000)
-learning_rate = _env_float("LEARNING_RATE", 3e-4)
-eval_interval = _env_int("EVAL_INTERVAL", 500)
-n_embd = _env_int("N_EMBD", 384)
-n_head = _env_int("N_HEAD", 6)
-n_layers = _env_int("N_LAYERS", 6)
-dropout = _env_float("DROPOUT", 0.2)
-tpu_cores = 8 # Always 8 for v5e-8
-
-# Global vars for data
+# Global Data (CPU)
 _train_data = None
 _val_data = None
 _vocab_size = None
 
+# --- 3. DATA SETUP ---
 def _load_data():
     global _train_data, _val_data, _vocab_size
     import tiktoken
     
-    # Ensure file exists
     path = 'data/movies/input.txt'
     if not os.path.exists(path):
-        # Fallback for testing if file missing
-        print(f"⚠️ File {path} not found! Creating dummy data.")
+        print("⚠️ No data file found. Using dummy data.")
         text = "Hello world " * 10000
     else:
         with open(path, 'r', encoding='utf-8') as f:
@@ -64,14 +53,57 @@ def _load_data():
 
     enc = tiktoken.get_encoding("gpt2")
     _vocab_size = enc.n_vocab
-    data = torch.tensor(enc.encode(text, allowed_special={'<|endoftext|>'}), dtype=torch.long)
     
-    n = int(0.9 * len(data))
-    _train_data = data[:n]
-    _val_data = data[n:]
+    # Load to CPU tensor
+    full_data = torch.tensor(enc.encode(text, allowed_special={'<|endoftext|>'}), dtype=torch.long)
+    
+    # Split Train/Val
+    n = int(0.9 * len(full_data))
+    _train_data = full_data[:n]
+    _val_data = full_data[n:]
+    
     return _vocab_size
 
-# --- MODEL COMPONENTS (Unchanged) ---
+# --- 4. BATCH GETTER (CPU Slicing) ---
+def get_batch(split, device):
+    # Select the correct data tensor (Global CPU tensors)
+    data = _train_data if split == 'train' else _val_data
+    
+    # Slice on CPU
+    ix = torch.randint(len(data) - block_size, (batch_size,), device='cpu')
+    x = torch.stack([data[i:i+block_size] for i in ix])
+    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    
+    # Move to TPU
+    x = x.to(device, non_blocking=True)
+    y = y.to(device, non_blocking=True)
+    return x, y
+
+# --- 5. ESTIMATE LOSS (The TPU-Safe Version) ---
+@torch.no_grad()
+def estimate_loss(model, device):
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters, device=device)
+        for k in range(eval_iters):
+            X, Y = get_batch(split, device)
+            logits, loss = model(X, Y)
+            losses[k] = loss
+        
+        # 1. Calculate the mean loss for THIS core
+        local_mean = losses.mean()
+        
+        # 2. SYNC: Average the loss across ALL 8 cores
+        # This prevents crashes by forcing all cores to wait here
+        global_mean = xm.all_reduce(xm.REDUCE_SUM, local_mean, scale=1.0/8)
+        
+        out[split] = global_mean.item()
+        
+    model.train()
+    return out
+
+# --- 6. MODEL (NanoGPT) ---
 class Head(nn.Module):
     def __init__(self, head_size):
         super().__init__()
@@ -85,7 +117,6 @@ class Head(nn.Module):
         B, T, C = x.shape
         k = self.key(x)
         q = self.query(x)
-        # Scaled Dot-Product Attention
         wei = q @ k.transpose(-2, -1) * (C ** -0.5)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
@@ -98,19 +129,15 @@ class MultiHeadAttention(nn.Module):
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
         self.dropout = nn.Dropout(dropout)
-
     def forward(self, x):
-        out = torch.cat([h(x) for h in self.heads], dim=-1)
-        return self.dropout(self.proj(out))
+        return self.dropout(self.proj(torch.cat([h(x) for h in self.heads], dim=-1)))
 
 class FeedFoward(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
-            nn.GELU(),
-            nn.Linear(4 * n_embd, n_embd),
-            nn.Dropout(dropout),
+            nn.Linear(n_embd, 4 * n_embd), nn.GELU(),
+            nn.Linear(4 * n_embd, n_embd), nn.Dropout(dropout),
         )
     def forward(self, x): return self.net(x)
 
@@ -122,11 +149,9 @@ class Block(nn.Module):
         self.ffwd = FeedFoward(n_embd)
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
-
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
-        x = x + self.ffwd(self.ln2(x))
-        return x
+        return x + self.ffwd(self.ln2(x))
 
 class GPT(nn.Module):
     def __init__(self, vocab_size):
@@ -141,106 +166,72 @@ class GPT(nn.Module):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
         pos_emb = self.positional_embedding_table(torch.arange(T, device=idx.device))
-        x = self.blocks(tok_emb + pos_emb)
-        x = self.ln_final(x)
+        x = self.ln_final(self.blocks(tok_emb + pos_emb))
         logits = self.lm_head(x)
-
         loss = None
         if targets is not None:
-            B, T, C = logits.shape
-            loss = F.cross_entropy(logits.view(B*T, C), targets.view(B*T))
+            loss = F.cross_entropy(logits.view(B*T, -1), targets.view(B*T))
         return logits, loss
 
-# --- TRAINING UTILS ---
-def get_batch(split, ctx_data, device):
-    # Retrieve the CPU data (pinned memory is best, but standard is fine)
-    data = ctx_data[split] 
-    
-    # 1. Generate indices on CPU (Fast)
-    ix = torch.randint(len(data) - block_size, (batch_size,), device='cpu')
-    
-    # 2. Slice on CPU (Fast & Pythonic)
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    
-    # 3. Ship ONLY the batch to the TPU (Fast transfer)
-    # non_blocking=True helps overlap transfer with computation
-    if device.type == 'xla':
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-    else:
-        x = x.to(device)
-        y = y.to(device)
-        
-    return x, y
-
-@torch.no_grad()
-def estimate_loss(model, ctx_data):
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_interval // 10, device=ctx_data['train'].device)
-        for k in range(len(losses)):
-            X, Y = get_batch(split, ctx_data)
-            _, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
-
-# --- WORKER FUNCTION ---
+# --- 7. TRAINING WORKER ---
 def _train_worker(index):
-    # 1. Setup Device
-    device = torch_xla.device()
-    rank = index
-    print(f"Core {rank} active on {device}")
-    
-    torch.manual_seed(1337 + rank)
-
-    # --- CRITICAL CHANGE ---
-    # Keep the massive dataset on CPU! Do not move to device yet.
-    # _train_data and _val_data are global tensors on CPU.
-    ctx_data = {
-        'train': _train_data, 
-        'val': _val_data
-    }
-    # -----------------------
-
-    model = GPT(_vocab_size).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
-    model.train()
-    
-    # Add a print to confirm loop entry
-    if rank == 0:
-        print("🚀 Compiling graph and starting loop... (This takes ~60s)")
-
-    for iter in range(max_iters):
-        # Pass 'device' so get_batch knows where to send the final result
-        xb, yb = get_batch('train', ctx_data, device)
+    try:
+        device = torch_xla.device()
+        rank = index
+        print(f"✅ Core {rank} active on {device}")
         
-        logits, loss = model(xb, yb)
+        torch.manual_seed(1337 + rank)
         
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        xm.optimizer_step(optimizer)
+        # Init Model
+        model = GPT(_vocab_size).to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+        
+        # Hard sync before loop
+        xm.rendezvous('init_complete')
+        
+        if rank == 0:
+            print("🚀 Graph compiled. Starting loop...")
+            start_time = time.time()
 
-        if iter % eval_interval == 0:
-            # Note: You might need to update estimate_loss to use the new get_batch signature too!
-            # For now, let's just print simple logging to unblock you.
-            if rank == 0:
-                print(f"Step {iter}: loss {loss.item():.4f}")
+        model.train()
+        
+        for iter in range(max_iters):
+            
+            # --- VALIDATION BLOCK ---
+            if iter % eval_interval == 0 and iter > 0:
+                # estimate_loss contains an implicit sync (xm.all_reduce)
+                # so it is safe to call here.
+                losses = estimate_loss(model, device)
                 
-                # Optional: Full eval (slower)
-                # losses = estimate_loss(model, ctx_data, device)
-# --- MAIN EXECUTION ---
+                if rank == 0:
+                    dt = time.time() - start_time
+                    print(f"Step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, time {dt:.2f}s")
+                    start_time = time.time() # Reset timer
+                
+                xm.save(model.state_dict(), 'checkpoint.pth')
+                
+                if rank == 0:
+                    print(f"✅ Saved checkpoint to checkpoint.pth")
+            # --- TRAINING BLOCK ---
+            xb, yb = get_batch('train', device)
+            
+            # Forward/Backward
+            logits, loss = model(xb, yb)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            
+            # Update (Implicit sync)
+            xm.optimizer_step(optimizer)
+
+    except Exception as e:
+        print(f"❌ ERROR on Core {index}: {e}")
+        raise e
+
+# --- 8. MAIN LAUNCHER ---
 if __name__ == '__main__':
-    # Load data once in the main process
+    print("⏳ Loading data...")
     _vocab_size = _load_data()
     print(f"Data loaded. Vocab size: {_vocab_size}")
     
-    if _xla_available:
-        print("🚀 Launching on TPU v5e-8...")
-        xmp.spawn(_train_worker, args=(), nprocs=None, start_method='fork') # ✅ Correct
-    else:
-        print("❌ TPU not found. Check environment.")
+    print("🔥 Spawning 8 TPU processes (BF16 Mode)...")
+    xmp.spawn(_train_worker, args=(), nprocs=None, start_method='fork')
